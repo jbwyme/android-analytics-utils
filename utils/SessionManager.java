@@ -22,37 +22,38 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.UUID;
 
+
 /** Usage **
 
-public class MainActivity extends Activity {
-    private SessionManager sessionManager;
+public class MainActivity extends ActionBarActivity {
+    private SessionManager _sessionManager;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
-        this.sessionManager = SessionManager.getInstance(this, new SessionManager.SessionCompleteCallback() {
+        this._sessionManager = SessionManager.getInstance(this, new SessionManager.SessionCompleteCallback() {
             @Override
             public void onSessionComplete(SessionManager.Session session) {
-                Log.d("MY APP", "session " + session.getUuid() + " is now closed");
+                Log.d("MY APP", "session " + session.getUuid() + " lasted for " + session.getSessionLength()/1000 + " seconds and is now closed");
 
             }
         });
-        this.sessionManager.startSession();
+        this._sessionManager.startSession();
     }
 
     @Override
     public void onResume()
     {
         super.onResume();
-        this.sessionManager.startSession();
+        this._sessionManager.startSession();
 
     }
 
     @Override
     public void onPause()
     {
-        this.sessionManager.endSession();
+        this._sessionManager.endSession();
         super.onPause();
     }
 }
@@ -61,42 +62,65 @@ public class MainActivity extends Activity {
 
 public class SessionManager {
 
+    /**
+     * Instantiate a new SessionManager object
+     * @param context
+     * @param callback
+     */
     private SessionManager(Context context, SessionCompleteCallback callback) {
-        this.context = context.getApplicationContext();
-        this.sessionCompleteCallback = callback; // this will be called any time a session is complete
+        this._appContext = context.getApplicationContext();
+        this._sessionCompleteCallback = callback; // this will be called any time a session is complete
         HandlerThread handlerThread = new HandlerThread(getClass().getCanonicalName());
         handlerThread.start();
-        this.handler = new SessionHandler(this, handlerThread.getLooper());
-        this.handler.sendEmptyMessage(MESSAGE_INIT);
+        this._sessionHandler = new SessionHandler(this, handlerThread.getLooper());
+        this._sessionHandler.sendEmptyMessage(MESSAGE_INIT);
     }
 
+    /**
+     * Get the SessionManager singleton object, create on if one doesn't exist
+     * @param context
+     * @param callback
+     * @return
+     */
     public static SessionManager getInstance(Context context, SessionCompleteCallback callback) {
-        if (instance == null) {
-            instance = new SessionManager(context, callback);
+        if (_instance == null) {
+            _instance = new SessionManager(context, callback);
         }
-        return instance;
+        return _instance;
     }
 
+    /**
+     * Dispatch request to handler thread to start a session
+     */
     public void startSession() {
-        handler.sendEmptyMessage(MESSAGE_START_SESSION);
+        _sessionHandler.sendEmptyMessage(MESSAGE_START_SESSION);
     }
 
+
+    /**
+     * Dispatch request to handler thread to end a session
+     */
     public void endSession() {
-        handler.sendEmptyMessage(MESSAGE_END_SESSION);
+        _sessionHandler.sendEmptyMessage(MESSAGE_END_SESSION);
     }
 
+    /**
+     * Called by the handler thread, this will resume the previous session if it ended within
+     * the given threshold otherwise it'll create a new session. If a session already exists,
+     * it will be a noop.
+     */
     private void _startSession() {
-        if (curSession == null) {
-            if (prevSession != null && !prevSession.isExpired()) {
-               Log.d(LOGTAG, "resuming session " + prevSession.getUuid());
-               curSession = prevSession;
-               curSession.resume();
-               prevSession = null;
+        if (_curSession == null) {
+            if (_prevSession != null && !_prevSession.isExpired()) {
+               Log.d(LOGTAG, "resuming session " + _prevSession.getUuid());
+               _curSession = _prevSession;
+               _curSession.resume();
+               _prevSession = null;
             } else {
-                curSession = new Session();
-                Log.d(LOGTAG, "creating new session " + curSession.getUuid());
-                synchronized (sessionsLock) {
-                    sessions.add(curSession);
+                _curSession = new Session();
+                Log.d(LOGTAG, "creating new session " + _curSession.getUuid());
+                synchronized (_sessionsLock) {
+                    _sessions.add(_curSession);
                     _writeSessionsToFile();
                     this._initSessionCompleter();
                 }
@@ -104,17 +128,24 @@ public class SessionManager {
         }
     }
 
+    /**
+     * Takes the current session, sets the end time, and sets it as the previous session.
+     */
     private void _endSession() {
-        if (curSession != null) {
-            curSession.end();
-            prevSession = curSession;
-            curSession = null;
+        if (_curSession != null) {
+            _curSession.end();
+            _prevSession = _curSession;
+            _curSession = null;
         }
     }
 
+    /**
+     * Spawns a thread to monitor for sessions that need to be completed (ended sessions that are
+     * guaranteed not to be resumed). If one is already running, this will be a noop.
+     */
     private void _initSessionCompleter() {
-        if (sessionCompleterThread == null || !sessionCompleterThread.isAlive()) {
-            sessionCompleterThread = new Thread() {
+        if (_sessionCompleterThread == null || !_sessionCompleterThread.isAlive()) {
+            _sessionCompleterThread = new Thread() {
                 @Override
                 public void run() {
                     try {
@@ -129,15 +160,15 @@ public class SessionManager {
 
                 private void _completeExpiredSessions() {
                     Log.d(LOGTAG, "checking for expired sessions...");
-                    synchronized(sessionsLock) {
-                        Iterator<Session> iterator = sessions.iterator();
+                    synchronized(_sessionsLock) {
+                        Iterator<Session> iterator = _sessions.iterator();
                         while (iterator.hasNext()) {
                             Session session = iterator.next();
                             if (session.isExpired()) {
                                 Log.d(LOGTAG, "expiring session id " + session.getUuid());
                                 iterator.remove();
                                 _writeSessionsToFile();
-                                sessionCompleteCallback.onSessionComplete(session);
+                                _sessionCompleteCallback.onSessionComplete(session);
                             } else {
                                 Log.d(LOGTAG, "session id " + session.getUuid() + " not yet expired...");
                             }
@@ -146,14 +177,18 @@ public class SessionManager {
                     }
                 }
             };
-            sessionCompleterThread.start();
+            _sessionCompleterThread.start();
         }
     }
 
+    /**
+     * Loads any previously non-completed sessions from local disk. This is necessary to guarantee
+     * that sessions are eventually completed when an app is hard-killed or crashes
+     */
     private void _loadSessionsFromFile() {
         FileInputStream fis = null;
         try {
-            fis = context.openFileInput(SESSIONS_FILE_NAME);
+            fis = _appContext.openFileInput(SESSIONS_FILE_NAME);
             InputStreamReader isr = new InputStreamReader(fis);
             BufferedReader bufferedReader = new BufferedReader(isr);
             StringBuilder sb = new StringBuilder();
@@ -163,16 +198,22 @@ public class SessionManager {
             }
             JSONArray sessionsJson = new JSONArray(sb.toString());
 
-            synchronized(sessionsLock) {
+            synchronized(_sessionsLock) {
                 for (int i = 0; i < sessionsJson.length(); i++) {
                     JSONObject sessionsObj = sessionsJson.getJSONObject(i);
                     Session session = new Session(sessionsObj);
+
+                    // if there are sessions that don't have an end time we must assume that the
+                    // app was killed mid session so we'll just send now as the end time. The better
+                    // solution would be to periodically mark a "lastAccessTime" that can be used
+                    // in such a case.
                     if (session.getEndTime() == null) {
                         session.end();
                     }
-                    sessions.add(session);
+
+                    _sessions.add(session);
                 }
-                if (sessions.size() > 0) {
+                if (_sessions.size() > 0) {
                     this._initSessionCompleter();
                 }
             }
@@ -185,12 +226,16 @@ public class SessionManager {
         }
     }
 
+    /**
+     * Writes the current sessions list to local disk. This is so we have a persistent snapshot
+     * of non-completed sessions that can be reloaded in case of app shutdown / crash.
+     */
     private void _writeSessionsToFile() {
         FileOutputStream fos = null;
         try {
-            fos = context.openFileOutput(SESSIONS_FILE_NAME, Context.MODE_PRIVATE);
+            fos = _appContext.openFileOutput(SESSIONS_FILE_NAME, Context.MODE_PRIVATE);
             JSONArray jsonArray = new JSONArray();
-            for (Session session : sessions) {
+            for (Session session : _sessions) {
                 jsonArray.put(session.toJSON());
             }
             fos.write(jsonArray.toString().getBytes());
@@ -242,7 +287,15 @@ public class SessionManager {
         }
 
         public boolean isExpired() {
-            return this.getEndTime() != null && System.currentTimeMillis() > this.getEndTime() + this.getsessionExpirationGracePeriod();
+            return this.endTime != null && System.currentTimeMillis() > this.endTime + this.sessionExpirationGracePeriod;
+        }
+
+        public Long getSessionLength() {
+            if (this.endTime != null) {
+                return this.endTime - this.startTime;
+            } else {
+                return System.currentTimeMillis() - this.startTime;
+            }
         }
 
         public String getUuid() {
@@ -257,7 +310,7 @@ public class SessionManager {
             return endTime;
         }
 
-        public Long getsessionExpirationGracePeriod() {
+        public Long getSessionExpirationGracePeriod() {
             return sessionExpirationGracePeriod;
         }
     }
@@ -266,6 +319,9 @@ public class SessionManager {
         public void onSessionComplete(Session session);
     }
 
+    /**
+     * Handler thread responsible for all session interaction
+     */
     public class SessionHandler extends Handler {
         private SessionManager sessionManager;
 
@@ -296,14 +352,14 @@ public class SessionManager {
     private static final int MESSAGE_START_SESSION = 1;
     private static final int MESSAGE_END_SESSION = 2;
 
-    private static SessionManager instance = null;
-    private static final Object[] sessionsLock = new Object[0];
-    private List<Session> sessions = new ArrayList<Session>();
-    private Session curSession = null;
-    private Session prevSession = null;
-    private SessionHandler handler;
-    private Context context = null;
-    private Thread sessionCompleterThread = null;
-    private final SessionCompleteCallback sessionCompleteCallback;
+    private static SessionManager _instance = null;
+    private static final Object[] _sessionsLock = new Object[0];
+    private List<Session> _sessions = new ArrayList<Session>();
+    private Session _curSession = null;
+    private Session _prevSession = null;
+    private SessionHandler _sessionHandler;
+    private Context _appContext = null;
+    private Thread _sessionCompleterThread = null;
+    private final SessionCompleteCallback _sessionCompleteCallback;
 }
 
